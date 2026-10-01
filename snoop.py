@@ -27,7 +27,7 @@ from charset_normalizer import detect as char_detect
 from collections import Counter
 from colorama import Fore, init, Style
 from concurrent.futures import as_completed, ProcessPoolExecutor, ThreadPoolExecutor, TimeoutError
-from multiprocessing import active_children, set_start_method
+from multiprocessing import active_children, set_start_method, util
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -136,6 +136,16 @@ if LINUX and not os.environ.get('BROWSER') and shutil.which('xdg-open'):
 
 dic_binding = {"badraw": [], "badzone": [],
                "censors": 0, "android_lame_workhorse": False}
+
+
+def reseed_worker():
+    "Сброс генератора для воркеров."
+    random.seed()
+    try:
+        if hasattr(ssl, 'RAND_status') and not ssl.RAND_status():
+            ssl.RAND_add(os.urllib.urandom(32), 0.5)
+    except Exception:
+        pass
 
 
 ## Создание web-каталога и его контроль, но не файлов внутри + раздача верных прав "-x -R" после компиляции двоичных данных [.mp3].
@@ -416,7 +426,23 @@ def r_session(cert=False, connect=0, speed=False, norm = False, method="get",
     elif method == "head":
         req_session = r_session.head
 
-    return req_session(url=url, headers=headers, allow_redirects=allow_redirects, timeout=timeout)
+    try:
+        response = req_session(url=url, headers=headers, allow_redirects=allow_redirects, timeout=timeout)
+        _ = response.content
+
+        if hasattr(response, 'raw') and response.raw:
+            try:
+                response.raw.close()
+            except Exception:
+                pass
+        return response
+    except Exception as e:
+        try:
+            r_session.close()
+        except Exception:
+            pass
+
+        return f"NET_ERROR:{type(e).__name__}"
 
 
 ## Вернуть результат future.
@@ -425,6 +451,9 @@ def r_results(request_future, error_type, websites_names, timeout=None, norm=Fal
               print_found_only=False, verbose=False, color=True, country_code=''):
     try:
         res = request_future.result(timeout=timeout + 10)
+# Перехват текстовой ошибки из воркера
+        if isinstance(res, str) and res.startswith("NET_ERROR:"):
+            raise requests.exceptions.ConnectionError(f"({res.split(':')[1]})")
         if res.status_code:
             return res, error_type, str(round(res.elapsed.total_seconds(), 2))
     except requests.exceptions.HTTPError as err1:
@@ -467,6 +496,9 @@ def new_session(url, headers, error_type, username, websites_names, r, t):
 
     response = r_session(url=url, headers=headers, allow_redirects=True, timeout=t)
 
+    if isinstance(response, str) and response.startswith("NET_ERROR:"):
+        raise requests.exceptions.ConnectionError("Сбой редиректа")
+
 # Ловушка на некот.сайтах (if response.content is not None ≠ if response.content).
     if response.content is not None and response.encoding == 'ISO-8859-1':
         try:
@@ -488,13 +520,13 @@ def sreports(url, headers, error_type, username, websites_names, r):
 # Сохранять отчеты для метода: redirection.
     if error_type == "redirection":
         try:
-            response, session_size = new_session(url, headers, error_type,
-                                                 username, websites_names, r, t=6)
+            response, session_size = new_session(url=url, headers=headers, error_type=error_type,
+                                                 username=username, websites_names=websites_names, r=r, t=6)
         except requests.exceptions.ConnectionError:
             time.sleep(0.02)
             try:
-                response, session_size = new_session(url, error_type, username,
-                                                     websites_names, r, headers="", t=3)
+                response, session_size = new_session(url=url, headers='', error_type=error_type,
+                                                     username=username, websites_names=websites_names, r=r, t=3)
             except Exception:
                 session_size = 'Err' #подсчет извлеченных данных
         except Exception:
@@ -1148,6 +1180,7 @@ def license_snoop():
 ## ОСНОВА.
 def main_cli():
     if not WINDOWS and not MACOS:
+        util.register_after_fork(reseed_worker, reseed_worker)
         set_start_method('fork')
     if "full" in VERSION:
         premium()
